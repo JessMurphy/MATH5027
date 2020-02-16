@@ -1,0 +1,425 @@
+---
+title: '2016 Olympics: Medal Analysis'
+author: "Jessica Murphy, Alex Rotondo, and Alex Schwartz"
+date: "September 23, 2019"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+library(dplyr)
+library(eeptools) #age_calc 
+library(faraway) #sumary 
+library(perturb) #colldiag
+library(leaps) #regsubsets
+library(car) #influencePlot
+library(gridExtra)
+library(plotROC)
+library(here)
+here()
+```
+
+### Read Data
+
+We chose two datasets from the 2016 Olympics that are located [here](https://www.kaggle.com/rio2016/olympic-games) on Kaggle.  
+
+```{r data}
+
+athletes = read.csv("athletes.csv", header=T, as.is=T)
+countries = read.csv("countries.csv", header=T, as.is=T)
+```
+
+Based on these datasets, there were `r prettyNum(nrow(athletes), big.mark = ",")` athletes and `r prettyNum(nrow(countries))` countries that partcipated in the Olympics.
+
+### Format Data
+
+We then merged information from the two datasets together into a new dataset.
+
+```{r merge}
+
+# convert olympic nationality codes to country codes
+# IOA - Kuwait (KUW), ROU - Romania (ROM), SRB -Serbia (SCG), TTO - Trinidad & Tobago (TRI)
+# https://en.wikipedia.org/wiki/List_of_IOC_country_codes
+athletes$nationality[athletes$nationality == "IOA"] = "KUW"
+athletes$nationality[athletes$nationality == "ROU"] = "ROM"
+athletes$nationality[athletes$nationality == "SRB"] = "SCG"
+athletes$nationality[athletes$nationality == "TTO"] = "TRI"
+
+# convert athletes' dob to age at start of olympics
+athletes$dob = as.Date(athletes$dob, "%m/%d/%Y")
+athletes = athletes[!is.na(athletes$dob),]
+athletes$age = floor(age_calc(athletes$dob, enddate=as.Date("2016-08-05"), units="years"))
+
+# determine number of medals per country
+medals = athletes %>% group_by(nationality) %>% summarize_at(vars(gold:bronze), sum) %>% 
+  mutate(total_medals = gold + silver + bronze)
+
+# determine number of athletes per country and their median age
+n_athletes = athletes %>% group_by(nationality) %>% summarize(total_athletes = n(), med_age = median(age))
+
+# determine number of males and females per country
+athletes$sex = as.factor(athletes$sex)
+females = athletes %>% filter(sex == "female") %>% count(nationality, name="females")
+males = athletes %>% filter(sex == "male") %>% count(nationality, name="males")
+
+# merge data into one data frame
+olympics = full_join(medals, n_athletes, by="nationality")
+olympics = full_join(olympics, females, by="nationality")
+olympics = full_join(olympics, males, by="nationality")
+
+colnames(olympics)[1] = "code"
+olympics = full_join(countries, olympics, by="code")
+
+# look at data summary
+summary(olympics)
+```
+
+After looking at this new data, a few of the variables have NA values that need to be addressed.
+
+```{r format}
+
+# convert male and female NAs to 0
+olympics$females[is.na(olympics$females)] = 0
+olympics$males[is.na(olympics$males)] = 0
+
+# fill in country NAs
+olympics[olympics$code == "KIR", 1] = "Kiribati"
+olympics[olympics$code == "KOS", 1] = "Kosovo"
+olympics[olympics$code == "MHL", 1] = "Marshall Islands"
+olympics[olympics$code == "MNE", 1] = "Montenegro"
+olympics[olympics$code == "ROT", 1] = "Refugee Olympic Team"
+olympics[olympics$code == "SSD", 1] = "South Sudan"
+olympics[olympics$code == "TUV", 1] = "Tuvalu"
+
+# alphabetize by country
+olympics = olympics %>% arrange(country)
+
+# remove countries with no medal information (just 1)
+olympics = olympics[!is.na(olympics$total_medals),]
+
+# remove countries with missing gdp values
+olympics = olympics[!is.na(olympics$gdp_per_capita),]
+```
+
+We also scaled a few of the variables that we were interested in so we could accurately compare them across different countries.
+
+```{r scale}
+
+# add percentages
+olympics = olympics %>% mutate(perc_athletes = (total_athletes/population)*100000, 
+                               perc_females = (females/total_athletes)*100, 
+                               perc_males = (males/total_athletes)*100,
+                               gdp_per_capita = gdp_per_capita/1000)
+```
+
+### Exploratory Plots
+
+#### Histograms
+
+Here we look at some histograms of the variables to see their distributions.
+
+```{r histograms, fig.width=7, fig.height=6}
+
+# histogram of total medals
+plot1 = ggplot(olympics, aes(total_medals)) + 
+  geom_histogram(col="black", bins=20) + 
+  labs(x="Medals", title="Total Medals") + 
+  theme_bw(base_size=10)
+
+# histogram of gdp per capita
+plot2 = ggplot(olympics, aes(gdp_per_capita)) + 
+  geom_histogram(col="black", bins=20) + 
+  labs(x="GDP (in thousands)", title="GDP per Capita") + 
+  theme_bw(base_size=10)
+
+# histogram of percent athlets
+plot3 = ggplot(olympics, aes(perc_athletes)) + 
+  geom_histogram(col="black", bins=20) + 
+  labs(x="% Athletes", title="Athletes per Population") + 
+  theme_bw(base_size=10)
+
+# histogram of median age
+plot4 = ggplot(olympics, aes(med_age)) + 
+  geom_histogram(col="black", bins=20) + 
+  labs(x="Age", title="Median Age") + 
+  theme_bw(base_size=10)
+
+# arrange plots in a 2 by 2 grid
+grid.arrange(plot1, plot2, plot3, plot4, ncol=2, nrow=2)
+```
+
+The distributions of total medals, gdp, and percent athletes are all very skewed to the right whereas the the distribution of age is fairly normal, approximately centered around 25.
+
+#### Scatterplots
+
+We also look at some scatterplots of our data to see if any relationships are visible. 
+
+```{r scatterplots, fig.width=7, fig.height=6}
+
+# scatterplot of medals vs gdp
+plot5 = ggplot(olympics, aes(x=gdp_per_capita, y=total_medals)) + 
+  geom_point(size=2) + 
+  labs(x="GDP (in thousands)", y="Medals", title="Medals vs GDP") + 
+  theme_bw(base_size=10) 
+
+# scatterplot of medals vs percent athletes
+plot6 = ggplot(olympics, aes(x=perc_athletes, y=total_medals)) + 
+  geom_point(size=2) + 
+  labs(x="% Athletes", y="Medals", title="Medals vs Athletes") + 
+  theme_bw(base_size=10) 
+
+# scatterplot of medals vs median age
+plot7 = ggplot(olympics, aes(x=med_age, y=total_medals)) + 
+  geom_point(size=2) + 
+  labs(x="Age", y="Medals", title="Medals vs Age") + 
+  theme_bw(base_size=10) 
+
+# scatterplot of medals vs percent females
+plot8 = ggplot(olympics, aes(x=perc_females, y=total_medals)) + 
+  geom_point(size=2) + 
+  labs(x="% Females", y="Medals", title="Medals vs Females") + 
+  theme_bw(base_size=10) 
+
+# arrange plots in a 2 by 2 grid
+grid.arrange(plot5, plot6, plot7, plot8, ncol=2, nrow=2)
+```
+
+The plots show there could be a slight positive relationship between medals and gdp as well as a slight negative relationship between medals and percent athletes.
+
+### Linear Regression
+
+Then we fit a linear model to our data based on our research question, with total medals as the response and gdp per capita, percent athletes, median age, and percent females as our predictors.
+
+#### Model
+
+```{r model}
+# fit linear model
+lmod = lm(total_medals ~ gdp_per_capita + perc_athletes + med_age + perc_females, data = olympics)
+sumary(lmod)
+```
+
+The summary shows that the only significant predictor based on a 0.05 significance level is gdp per capita. However, it also shows that our model fit is pretty low, with an R-squared value of only 0.16.
+
+#### Collinearity check
+
+Here we check for collinearity to ensure none of our predictors are linearly depenent on one another.
+
+```{r collinearity}
+
+# extract X matrix from model
+x = model.matrix(lmod)
+x = x[,-1] # remove intercept
+
+# correlation matrix
+round(cor(x), 2)
+
+# variance inflation factors
+vif(lmod) #looks good (<5)
+```
+
+All of the correlations are less than 0.5 and all of the vifs are less than 5, so there is no evidence of collinearity.
+
+#### Variable selection
+
+Next, we determine which variables should stay in our model, based on the AIC, Adjusted R-squared, and Mallow's Cp statistic. We then fit a new model with only the selected variables.
+
+```{r selection, fig.width=7, fig.height=6}
+
+# extract model information
+model_info = regsubsets(total_medals ~ gdp_per_capita + perc_athletes + med_age + perc_females, data = olympics)
+b = summary(model_info)
+
+# get variable decision matrix
+b$which
+
+# AIC: p=3
+p = 2:5
+AIC = b$bic + p * (2 - log(176))
+plot9 = ggplot() + aes(x=c(1:4), y=AIC) + 
+  geom_point(size=2) + 
+  labs(x="No. of Regressors", title="AIC") +
+  theme_bw(base_size=10)
+
+# Adjusted R-squared: p=4
+plot10 = ggplot() + aes(x=c(1:4), y=b$adjr2) + 
+  geom_point(size=2) + 
+  labs(x="No. of Regressors", y=expression({R^2}[a]), 
+       title=expression(paste("Adjusted R"^"2"))) +
+  theme_bw(base_size=10)
+
+# Mallows Cp: p=3
+plot11 = ggplot() + aes(x=c(1:4), y=b$cp) + 
+  geom_point(size=2) + 
+  geom_abline(intercept=0, slope=1) +
+  labs(x="No. of Regressors", y=expression(paste(C[p], " statistic")), 
+       title=expression(paste("Mallows ", C[p]))) +
+  theme_bw(base_size=10)
+
+# arrange plots in a 2 by 2 grid
+grid.arrange(plot9, plot10, plot11, ncol=2, nrow=2)
+
+# Remove variables
+lmod2 = update(lmod, . ~ . - med_age - perc_athletes)
+sumary(lmod2)
+```
+
+The plots show that the optimal number of regressors is 2, which includes gdp per capita and percent females. The summary of the updated model shows that R-squared value is only 0.01 less than the model with all four variables. Also, the percent females variable is slightly more significant, but not based on a 0.05 significance level.
+
+#### Check assumptions
+
+Here we check the model assumptions: linearity, independence, homoscedascity, and normality.
+
+```{r structure, fig.height=3, fig.width=7}
+
+# studentized residuals
+studentized2 = rstudent(lmod2)
+fitted2 = fitted(lmod2)
+
+# check linearity / homoscedasticity
+plot12 = ggplot(lmod2, aes(x=fitted2, y=studentized2)) + 
+  geom_point(col="black", size=2) + 
+  geom_hline(yintercept = 0, lty = 2) + 
+  theme_bw(base_size=10) + labs(x="Fitted Values", y="Studentized Residuals", title="Residuals vs Fitted Values")
+
+# visualize R-squared
+r2 = format(summary(lmod2)$r.squared, digits=2)
+plot13 = ggplot(lmod2, aes(x=fitted2, y=olympics$total_medals)) + 
+  geom_point(col="black", size=2) + 
+  geom_abline(aes(intercept=0, slope=1), lty=2) +
+  theme_bw(base_size=10) + labs(x="Fitted Values", y="Actual Values", title="Actual vs Fitted Values") + annotate("text", label=paste("R^2: ", r2, sep=""), x=13, y=225, parse=T, size=4)
+
+# arrange plots in a 1 by 2 grid
+grid.arrange(plot12, plot13, ncol=2)
+```
+
+Though we do see that the residuals are normally distributed and most dense around zero, the constant variance assumption appears to be violated when the fitted values are plotted against the residuals. At lower fitted values, the residuals tend closer to zero, but as the fitted values increase, the spread of the residuals from zero increases.
+
+```{r structure2, fig.height=4, fig.width=8}
+
+# check normality
+par(mfrow=c(1,2))
+qqPlot(studentized2, main="QQ Plot")
+shapiro.test(studentized2)
+
+# check leverage points / outliers
+influencePlot(lmod2, main="Influence Plot") #198
+```
+
+Regarding the influence plot, observations with high leverage and potentially outlying values are identified on the plot. Due to the large discrepencies in population size of countries who won medals versus countries who did not, removing such observations would lessen the model's predictive value.
+
+#### Transformations
+
+Now, we fit a new model with a square root transformation of the response and a quadratic transformation of gdp. We also re-evaluate our previous assumptions.
+
+```{r transformations, fig.height=3, fig.width=7}
+
+# fit new linear model with transformations
+lmod3 = lm(sqrt(total_medals) ~ poly(gdp_per_capita,2) + perc_females, data = olympics)
+sumary(lmod3)
+
+# studentized residuals
+studentized3 = rstudent(lmod3)
+fitted3 = fitted(lmod3)
+
+# check linearity / homoscedasticity
+plot14 = ggplot(lmod3, aes(x=fitted3, y=studentized3)) + 
+  geom_point(col="black", size=2) + 
+  geom_hline(yintercept = 0, lty = 2) + 
+  theme_bw(base_size=10) + labs(x="Fitted Values", y="Studentized Residuals", title="Residuals vs Fitted Values")
+
+# visualize R-squared
+r2.3 = format(summary(lmod3)$r.squared, digits=2)
+plot15 = ggplot(lmod3, aes(x=fitted3, y=sqrt(olympics$total_medals))) + 
+  geom_point(col="black", size=2) + 
+  geom_abline(aes(intercept=0, slope=1), lty=2) +
+  theme_bw(base_size=10) + labs(x="Fitted Values", y="Actual Values", title="Actual vs Fitted Values") + annotate("text", label=paste("R^2: ", r2.3, sep=""), x=1, y=14, parse=T, size=4)
+
+# arrange plots in a 1 by 2 grid
+grid.arrange(plot14, plot15, ncol=2)
+```
+
+```{r transformations2, fig.height=4, fig.width=8}
+
+# check normality
+par(mfrow=c(1,2))
+qqPlot(studentized3, main="QQ Plot")
+shapiro.test(studentized3)
+```
+
+Applying a square root transformation to the response and squaring gdp_per_capita shows the studentized residuals deviating slightly to the left of zero, with significantly less deivation from homoscedasticity than the previous non-transformed model. 
+
+### Logistic Regression
+
+Thinking of each country as its own district and total medals as the count of Olympic medals obtained by each country, a scenario better described by a Poisson distribution emerges. As a consequence, a linear model may not best predict the number of Olympic medals won by each country.
+
+An approach using logistic regression is described below to determine the probability of a country medaling in the Olympics.
+
+```{r logistic, fig.height=3, fig.width=7}
+
+# create new categorical variable for medals
+olympics$medals = cut(olympics$total_medals, breaks = c(-Inf, 0, Inf), labels = c("no", "yes"))
+summary(olympics$medals)
+
+# look at distribution of new response variable
+plot16 = ggplot(olympics, aes(x=medals, fill=medals)) + 
+  geom_bar(color="black", width=0.75) + 
+  scale_y_continuous(limits = c(0, 110)) +
+  geom_text(stat='count', aes(label=..count..), vjust=-1) +
+  labs(x="Medals", title="Medals") + 
+  theme_bw(base_size=10) +
+  theme(legend.position="none")
+
+# compare new response to gdp
+plot17 = ggplot(olympics, aes(x=medals, y=gdp_per_capita, fill=medals)) + 
+  geom_boxplot() + 
+  labs(x="Medals", y="GDP (in thousands)", title="GDP vs Medals") + 
+  theme_bw(base_size=10) +
+  theme(legend.position="none")
+
+# arrange plots in a 1 by 2 grid
+grid.arrange(plot16, plot17, ncol=2)
+
+# fit logistic regression model
+glm.out = glm(medals ~ gdp_per_capita + perc_athletes + med_age + perc_females, data = olympics, family = binomial)
+sumary(glm.out)
+```
+
+```{r predictability, fig.height = 3, fig.width = 7}
+
+# convert medals to binary variable (0-no, 1-yes)
+olympics$medals2 = ifelse(olympics$medals == "no", 0, 1)
+
+# make data frame of predicted and actual values for medals
+df = data.frame(predictor = predict(glm.out, olympics, type="response"), 
+                known.truth = olympics$medals2)
+
+# convert predicted probabilities to 0's and 1's 
+threshold=0.5
+df$predicted.medals = ifelse(df$predictor<threshold,0,1)
+
+# pirate plot of predicted probabilites
+plot18 = ggplot(olympics, aes(y = df$predictor, x = medals, fill=medals)) + 
+  geom_violin(trim=FALSE, show.legend=F) + 
+  geom_boxplot(width=0.2, fill="white", outlier.color="black", outlier.shape=1, 
+               color="black", outlier.size=2) + 
+  labs(y="Predicted Probability", x="Medals", title="Pirate Plot") + 
+  geom_hline(yintercept=0.5, linetype="dashed") +
+  theme_bw(base_size=10)
+
+# plot roc curve
+roc.plot = ggplot(df, aes(d = known.truth, m = predictor)) + 
+  geom_roc(n.cuts=0) + 
+  geom_abline(intercept = 0, slope = 1, linetype="dashed") +
+  labs(x="False Postive Fraction", y="True Positive Fraction", title="ROC Curve") +
+  theme_bw(base_size=10)
+
+# add auc value to plot
+plot19 = roc.plot + annotate("text", x = .75, y = .25, size = 4, label = paste("AUC =", round(calc_auc(roc.plot)$AUC, 2)))
+
+# arrange plots in a 1 by 2 grid
+grid.arrange(plot18, plot19, ncol=2)
+```
+
+Based on the AUC value, the model has approxmiately a 76% chance of distinguishing between countries who won medals versus countries who did not win medals. However, since this was evaluated on the data used to train our model, we would expect the classification to not do as well on a test dataset.
